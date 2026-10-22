@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ee0033">
+  <title>IT WORKSPACE | Cổng quản lý vận hành CNTT</title>
+  <style>
+    :root{color-scheme:light;--red:#ee0033;--ink:#18283d;--muted:#637287;--line:#e5eaf0;--bg:#f5f7fa}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 8%,#ffe5eb 0,transparent 30%),linear-gradient(145deg,#fff 0,#f6f8fb 60%,#fff 100%);color:var(--ink);font:16px/1.6 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh;display:grid;place-items:center;padding:24px}
+    .shell{width:min(800px,100%);background:#fff;border:1px solid var(--line);border-radius:24px;box-shadow:0 24px 70px #1a2b4212;overflow:hidden}
+    header{display:flex;align-items:center;gap:18px;padding:24px 28px;border-bottom:1px solid var(--line)}.logo{width:82px;height:auto;object-fit:contain;flex:none}.brand h1{font-size:clamp(21px,3vw,29px);line-height:1.18;letter-spacing:.02em;margin:0 0 7px;font-weight:850}.brand p{margin:0;color:var(--muted);font-size:13px;font-weight:700;letter-spacing:.08em}
+    main{padding:clamp(24px,5vw,48px)}.eyebrow{display:inline-flex;align-items:center;gap:8px;color:var(--red);font-size:12px;font-weight:800;letter-spacing:.09em;text-transform:uppercase}.dot{width:8px;height:8px;background:var(--red);border-radius:50%}h2{margin:14px 0 10px;font-size:clamp(28px,5vw,42px);line-height:1.13;letter-spacing:-.035em}.lead{margin:0;color:var(--muted);max-width:620px}
+    .actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:28px}.btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:48px;border-radius:10px;padding:0 20px;text-decoration:none;font-weight:750;border:1px solid var(--line);color:var(--ink);background:#fff;cursor:pointer}.primary{background:var(--red);color:#fff;border-color:var(--red);box-shadow:0 8px 20px #ee003323}.primary:hover{background:#ce002d}.btn:focus-visible{outline:3px solid #ee003355;outline-offset:3px}
+    .status{margin-top:22px;padding:13px 15px;border:1px solid var(--line);background:#f8fafc;border-radius:10px;color:var(--muted);font-size:13px}.status.error{border-color:#f1c2c9;background:#fff5f6;color:#9f1d35}.foot{padding:16px 28px;background:#fafbfd;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;color:#7a8798;font-size:12px}
+    @media(max-width:520px){body{padding:12px}.shell{border-radius:17px}header{padding:19px;align-items:flex-start;gap:13px}.logo{width:62px}.brand p{font-size:10px;letter-spacing:.035em}.actions .btn{width:100%}.foot{padding:14px 19px}}
+  </style>
+  <script src="./config.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <img class="logo" src="./Viettel_logo_2021.png" alt="Viettel logo">
+      <div class="brand"><h1>IT WORKSPACE</h1><p>CỔNG QUẢN LÝ VẬN HÀNH CNTT</p></div>
+    </header>
+    <main>
+      <div class="eyebrow"><span class="dot"></span> IT operations workspace</div>
+      <h2>Một cổng vào cho công việc CNTT.</h2>
+      <p class="lead">Tra cứu địa chỉ IP, xem sơ đồ kết nối mạng và mở kho hướng dẫn xử lý lỗi. Nhân sự không cần tài khoản để vào landing page; chỉ Admin đăng nhập khi cần quản trị.</p>
+      <div class="actions">
+        <a class="btn primary" id="openApp" href="#">Mở IT WORKSPACE <span aria-hidden="true">→</span></a>
+        <button class="btn" id="retry" type="button">Kiểm tra lại liên kết</button>
+      </div>
+      <div class="status" id="status" role="status" aria-live="polite">Đang kiểm tra đường dẫn ứng dụng GAS…</div>
+    </main>
+    <div class="foot"><span>IT WORKSPACE · Cổng quản lý vận hành CNTT</span><span>Vietnamese / English · Responsive</span></div>
+  </div>
+<script>
+(function(){
+  'use strict';
+  const input = String((window.ITW_CONFIG || {}).GAS_WEBAPP_URL || '').trim();
+  const link = document.getElementById('openApp');
+  const status = document.getElementById('status');
+  const valid = /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:\?.*)?$/.test(input);
+  if (valid) {
+    link.href = input;
+    status.textContent = 'Đã cấu hình liên kết GAS. Bấm “Mở IT WORKSPACE” để vào landing page và ứng dụng.';
+    // Keep the portal page as a reusable bookmark; do not auto-redirect unexpectedly.
+  } else {
+    link.setAttribute('aria-disabled','true');
+    link.style.opacity = '.55';
+    link.addEventListener('click', function(e){e.preventDefault();});
+    status.className = 'status error';
+    status.textContent = 'Chưa cấu hình URL GAS. Mở config.js, thay PASTE_YOUR_DEPLOYED_GAS_EXEC_URL_HERE bằng URL Web App kết thúc bằng /exec, rồi commit lại.';
+  }
+  document.getElementById('retry').addEventListener('click', function(){location.reload();});
+})();
+</script>
+</body>
+</html>
