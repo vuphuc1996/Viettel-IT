@@ -277,106 +277,105 @@ const GAS_MODE = typeof google !== 'undefined' && !!google.script && !!google.sc
 const IS_GITHUB_PAGES = location.hostname.toLowerCase() === 'vuphuc1996.github.io';
 const GAS_WEBAPP_URL = String((window.ITW_CONFIG && window.ITW_CONFIG.GAS_WEBAPP_URL) || '').trim();
 const GAS_WEBAPP_URL_VALID = /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:\?.*)?$/.test(GAS_WEBAPP_URL);
-const GAS_BRIDGE_MODE = !GAS_MODE && GAS_WEBAPP_URL_VALID;
-// A published GitHub page must never fall back to simulated IP data or demo authentication.
-const BACKEND_MODE = GAS_MODE || GAS_BRIDGE_MODE || IS_GITHUB_PAGES;
-const ITW_BRIDGE_CHANNEL = 'ITW_GAS_BRIDGE_V1';
-let gasBridgeFrame = null, gasBridgeOrigin = '', gasBridgeReady = false, gasBridgeReadyPromise = null;
-let gasBridgeResolveReady = null, gasBridgeRejectReady = null, gasBridgeReadyTimer = null;
-let gasBridgeLastOrigin = '', gasBridgeLastMessageType = '';
-const gasBridgePending = new Map();
+// GitHub Pages cannot read GAS cross-origin responses directly. Instead of
+// embedding an HtmlService bridge (which depends on Google's frame headers),
+// use an ordinary form POST plus one-time JSONP polling for its result.
+const GAS_FORM_RPC_MODE = !GAS_MODE && GAS_WEBAPP_URL_VALID;
+const BACKEND_MODE = GAS_MODE || GAS_FORM_RPC_MODE || IS_GITHUB_PAGES;
+const gasRpcPending = new Map();
 let authToken = BACKEND_MODE ? (sessionStorage.getItem('itwSessionToken') || '') : '';
-function isTrustedGasBridgeOrigin(origin){
-  try { const u = new URL(origin); return u.protocol === 'https:' && (u.hostname === 'script.google.com' || (u.hostname.endsWith('.googleusercontent.com') && /(^|[.-])script([.-]|$)/i.test(u.hostname)));  }
-  catch (_) { return false; }
+function randomHex(byteCount=24){
+  const bytes=new Uint8Array(byteCount);
+  if(!window.crypto||!window.crypto.getRandomValues)throw new Error('Trình duyệt không hỗ trợ bộ sinh mã an toàn.');
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
 }
-function ensureGasBridgeReady(){
-  if(gasBridgeReady) return Promise.resolve();
-  if(gasBridgeReadyPromise) return gasBridgeReadyPromise;
-  if(!GAS_WEBAPP_URL_VALID) return Promise.reject(new Error('GAS_WEBAPP_URL chưa được cấu hình trong config.js.'));
-  gasBridgeLastOrigin = ''; gasBridgeLastMessageType = '';
-  gasBridgeReadyPromise = new Promise((resolve,reject)=>{
-    gasBridgeResolveReady = resolve; gasBridgeRejectReady = reject;
-    const frame = document.createElement('iframe');
-    frame.id = 'itwGasBridgeFrame'; frame.title = 'IT WORKSPACE backend connection';
-    frame.setAttribute('aria-hidden','true'); frame.tabIndex = -1;
-    frame.style.cssText = 'position:fixed;left:-10000px;top:0;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
-    gasBridgeFrame = frame;
-    gasBridgeReadyTimer = setTimeout(()=>{
-      gasBridgeReadyTimer = null;
-      const details = gasBridgeLastOrigin ? (' Origin iframe cuối nhận được: ' + gasBridgeLastOrigin + '.') : ' Iframe không gửi tín hiệu ready; có thể URL /exec yêu cầu đăng nhập, chưa được deploy công khai hoặc đang chạy phiên bản cũ.';
-      const err = new Error('Không kết nối được GAS bridge. Kiểm tra URL /exec, quyền Web App Anyone, Execute as Me và deployment mới.' + details);
-      gasBridgeReadyPromise = null; gasBridgeReady = false;
-      if(gasBridgeFrame){ gasBridgeFrame.remove(); gasBridgeFrame = null; }
-      gasBridgeOrigin = '';
-      if(gasBridgeRejectReady) gasBridgeRejectReady(err);
-      gasBridgeResolveReady = null; gasBridgeRejectReady = null;
-    },7000);
-    try {
-      const url = new URL(GAS_WEBAPP_URL); url.searchParams.set('bridge','1'); url.searchParams.set('bridgeVersion','1');
-      frame.src = url.toString(); document.body.appendChild(frame);
-    } catch(e) {
-      clearTimeout(gasBridgeReadyTimer); gasBridgeReadyTimer = null; gasBridgeReadyPromise = null;
-      reject(new Error('GAS_WEBAPP_URL không hợp lệ.')); gasBridgeFrame = null;
-    }
-  });
-  return gasBridgeReadyPromise;
-}
-window.addEventListener('message',event=>{
-  if(!gasBridgeFrame || event.source !== gasBridgeFrame.contentWindow) return;
-  if(!isTrustedGasBridgeOrigin(event.origin)){
-    gasBridgeLastOrigin = String(event.origin || 'unknown');
-    console.warn('[IT WORKSPACE] Bridge message origin rejected:', gasBridgeLastOrigin);
-    return;
-  }
-  const message = event.data;
-  if(!message || message.channel !== ITW_BRIDGE_CHANNEL) return;
-  gasBridgeLastOrigin = String(event.origin || '');
-  gasBridgeLastMessageType = String(message.type || '');
-  if(message.type === 'ready'){
-    gasBridgeOrigin = event.origin; gasBridgeReady = true;
-    if(gasBridgeReadyTimer){clearTimeout(gasBridgeReadyTimer);gasBridgeReadyTimer=null;}
-    if(gasBridgeResolveReady) gasBridgeResolveReady();
-    gasBridgeResolveReady = null; gasBridgeRejectReady = null; gasBridgeReadyPromise = null;
-    return;
-  }
-  if(message.type !== 'result' || typeof message.id !== 'string') return;
-  const pending = gasBridgePending.get(message.id); if(!pending) return;
-  gasBridgePending.delete(message.id); clearTimeout(pending.timer);
-  if(message.transportOk) pending.resolve(message.result);
-  else pending.reject(new Error(message.message || 'GAS request failed.'));
-});
+function delay(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
 function gasCallTimeoutMs(name){
-  // Bound every request so a lost iframe callback cannot lock the whole UI.
-  // Imports remain subject to the same limit; the user can inspect the list before retrying.
+  // A hard upper limit keeps a failed backend from locking the UI forever.
   return 12000;
 }
 function gasTimeoutError(name, timeoutMs){
   const writeMethods=new Set(['apiUpsertRecord','apiDeleteRecord','apiImportRecords','apiCatalogMutate','apiSaveSettings','apiSaveBranding','apiChangeAdminPassword','apiSaveHelpArticle','apiDeleteHelpArticle','apiQueueDiagnostic']);
   if(typeof lang!=='undefined'&&lang==='en'){
-    return new Error('The request did not respond within '+Math.round(timeoutMs/1000)+' seconds. Waiting has stopped to keep the page responsive. '+(writeMethods.has(name)?'The server may still finish the operation; refresh the data before retrying.':'Check the connection and try again.'));
+    return new Error('Google Apps Script did not return a response within '+Math.round(timeoutMs/1000)+' seconds. '+(writeMethods.has(name)?'The server may still finish the operation; refresh the data before retrying.':'Check the GAS deployment URL and access settings, then retry.'));
   }
-  return new Error('Không nhận được phản hồi trong '+Math.round(timeoutMs/1000)+' giây. Hệ thống đã dừng chờ để tránh treo giao diện. '+(writeMethods.has(name)?'Máy chủ có thể vẫn hoàn tất thao tác; hãy tải lại dữ liệu để kiểm tra trước khi thực hiện lại.':'Vui lòng kiểm tra kết nối rồi thử lại.'));
+  return new Error('Google Apps Script không trả kết quả trong '+Math.round(timeoutMs/1000)+' giây. '+(writeMethods.has(name)?'Máy chủ có thể vẫn hoàn tất thao tác; hãy tải lại dữ liệu để kiểm tra trước khi thực hiện lại.':'Kiểm tra URL GAS, quyền Web App và phiên bản deployment rồi thử lại.'));
 }
-function gasBridgeCall(name,args){
-  const timeoutMs=gasCallTimeoutMs(name);
+function submitGasRpcForm(payload){
+  const frameName='itw_rpc_frame_'+payload.requestId;
+  const frame=document.createElement('iframe');
+  frame.name=frameName; frame.title='IT WORKSPACE RPC transport'; frame.tabIndex=-1;
+  frame.setAttribute('aria-hidden','true');
+  frame.style.cssText='position:fixed;left:-10000px;top:0;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
+  const form=document.createElement('form');
+  form.method='POST'; form.action=GAS_WEBAPP_URL; form.target=frameName;
+  form.enctype='application/x-www-form-urlencoded'; form.acceptCharset='UTF-8';
+  form.style.cssText='display:none!important';
+  const input=document.createElement('input'); input.type='hidden'; input.name='itwRpcRequest'; input.value=JSON.stringify(payload); form.appendChild(input);
+  document.body.appendChild(frame); document.body.appendChild(form);
+  try{form.submit();}catch(e){form.remove();frame.remove();throw new Error('Không gửi được yêu cầu tới GAS: '+(e&&e.message?e.message:'lỗi trình duyệt'));}
+  form.remove();
+  return ()=>{try{frame.remove();}catch(_){}};
+}
+function jsonpRpcPoll(requestId,pollKey,timeoutMs){
   return new Promise((resolve,reject)=>{
-    const id='rpc_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,12);
-    let timedOut=false;
-    const timer=setTimeout(()=>{timedOut=true;gasBridgePending.delete(id);reject(gasTimeoutError(name,timeoutMs));},timeoutMs);
-    (async()=>{
-      try{
-        await ensureGasBridgeReady();
-        if(timedOut)return;
-        if(!gasBridgeReady||!gasBridgeFrame||!gasBridgeOrigin)throw new Error('Không kết nối được GAS bridge. Kiểm tra URL /exec, quyền Web App và deployment.');
-        gasBridgePending.set(id,{resolve,reject,timer});
-        gasBridgeFrame.contentWindow.postMessage({channel:ITW_BRIDGE_CHANNEL,type:'request',id,method:String(name),args:Array.isArray(args)?args:[]},gasBridgeOrigin);
-      }catch(e){
-        if(timedOut)return;
-        clearTimeout(timer);gasBridgePending.delete(id);reject(e);
-      }
-    })();
+    const callbackName='__itwRpc_'+randomHex(12);
+    const script=document.createElement('script');
+    let finished=false,called=false;
+    const timer=setTimeout(()=>finish(reject,new Error('Hết thời gian chờ một lần kiểm tra kết quả.')),timeoutMs);
+    function finish(handler,value){
+      if(finished)return; finished=true; clearTimeout(timer);
+      script.onerror=null; script.onload=null; script.remove();
+      try{delete window[callbackName];}catch(_){window[callbackName]=undefined;}
+      handler(value);
+    }
+    window[callbackName]=function(data){called=true;finish(resolve,data);};
+    script.onerror=()=>finish(reject,new Error('GAS result polling failed.'));
+    script.onload=()=>{if(!called)finish(reject,new Error('GAS returned no JSONP callback.'));};
+    try{
+      const url=new URL(GAS_WEBAPP_URL);
+      url.searchParams.set('itwPoll','1'); url.searchParams.set('requestId',requestId);
+      url.searchParams.set('pollKey',pollKey); url.searchParams.set('callback',callbackName);
+      url.searchParams.set('_',String(Date.now())); script.src=url.toString();
+      document.head.appendChild(script);
+    }catch(e){finish(reject,new Error('GAS URL không hợp lệ.'));}
   });
+}
+async function gasFormRpcCall(name,args){
+  if(!GAS_WEBAPP_URL_VALID)throw new Error('GAS_WEBAPP_URL chưa được cấu hình trong config.js.');
+  const timeoutMs=gasCallTimeoutMs(name), deadline=Date.now()+timeoutMs;
+  const requestId='r_'+Date.now().toString(36)+'_'+randomHex(20);
+  const pollKey=randomHex(32);
+  const cleanup=submitGasRpcForm({requestId:requestId,pollKey:pollKey,method:String(name),args:Array.isArray(args)?args:[]});
+  try{
+    let lastTransportError=null;
+    while(Date.now()<deadline){
+      const remaining=deadline-Date.now();
+      let envelope;
+      try{
+        envelope=await jsonpRpcPoll(requestId,pollKey,Math.max(400,Math.min(1800,remaining)));
+      }catch(e){
+        lastTransportError=e;
+        if(Date.now()<deadline)await delay(140);
+        continue;
+      }
+      if(envelope&&envelope.ok===true&&envelope.pending===true){
+        await delay(Math.min(180,Math.max(0,deadline-Date.now())));
+        continue;
+      }
+      if(!envelope||envelope.ok!==true)throw new Error((envelope&&envelope.message)||'Phản hồi JSONP từ GAS không hợp lệ.');
+      const response=envelope.response;
+      if(!response)throw new Error('GAS không trả về dữ liệu RPC.');
+      // A validly transported application error must fail immediately; retrying
+      // would poll an already-consumed one-time result until the UI times out.
+      if(response.ok!==true)throw new Error(response.message||'GAS không thực hiện được yêu cầu.');
+      return response.result;
+    }
+    const timeoutError=gasTimeoutError(name,timeoutMs);
+    if(lastTransportError && /Invalid polling request|Invalid RPC payload|API method is not allowed/i.test(lastTransportError.message))throw lastTransportError;
+    throw timeoutError;
+  }finally{cleanup();}
 }
 function withGasTimeout(promise,name,timeoutMs){
   let timer;
@@ -392,7 +391,7 @@ function gasCallRaw(name,...args){
       });
       return withGasTimeout(call,name,gasCallTimeoutMs(name));
     }
-    if(GAS_BRIDGE_MODE)return gasBridgeCall(name,args);
+    if(GAS_FORM_RPC_MODE)return gasFormRpcCall(name,args);
     return Promise.reject(new Error('GAS_WEBAPP_URL chưa được cấu hình trong config.js.'));
   }catch(e){return Promise.reject(e);}
 }
@@ -447,9 +446,9 @@ function healthMessageFor(code, fallback=''){
   CONNECTED: en
    ? 'GAS and Google Sheets are connected.'
    : 'Đã kết nối GAS và Google Sheets.',
-  FRONTEND_BRIDGE_FAILED: en
-   ? 'GitHub Pages could not establish the hidden GAS bridge. Confirm the Web App is deployed as Execute as: Me, access: Anyone, the bridge Code.gs version is deployed, and config.js uses its current /exec URL.'
-   : 'GitHub Pages không thiết lập được cầu nối GAS ẩn. Kiểm tra Web App triển khai với Execute as: Me, quyền truy cập Anyone, Code.gs đã deploy phiên bản mới và config.js dùng đúng URL /exec hiện tại.',
+  GAS_RPC_TRANSPORT_FAILED: en
+   ? 'GitHub Pages could not complete the GAS form/JSONP request. Confirm the Web App is deployed as Execute as: Me, access: Anyone, the new Code.gs version is deployed, and config.js uses its current /exec URL.'
+   : 'GitHub Pages chưa hoàn tất được yêu cầu form/JSONP tới GAS. Kiểm tra Web App với Execute as: Me, quyền Anyone, Code.gs phiên bản mới và URL /exec trong config.js.',
   API_METHOD_NOT_ALLOWED: en
    ? 'The GAS deployment is using an older Code.gs that does not allow this diagnostic API. Deploy a new version of the current Code.gs.'
    : 'Deployment GAS đang chạy Code.gs cũ chưa cho phép API chẩn đoán này. Hãy deploy phiên bản mới của Code.gs hiện tại.'
@@ -457,7 +456,7 @@ function healthMessageFor(code, fallback=''){
  if(messages[code])return messages[code];
  const text=String(fallback||'').trim();
  if(en&&/API method is not allowed|API method not allowed/i.test(text))return messages.API_METHOD_NOT_ALLOWED;
- if(en&&/bridge|postMessage/i.test(text))return messages.FRONTEND_BRIDGE_FAILED;
+ if(en&&/bridge|postMessage|JSONP|form POST/i.test(text))return messages.GAS_RPC_TRANSPORT_FAILED;
  if(en&&/GAS_WEBAPP_URL.*(config|configured)/i.test(text))return 'The GAS Web App URL in config.js is missing or invalid. It must be the deployed URL ending in /exec.';
  if(en&&text)return text;
  return text||(en?'Unknown connection error.':'Lỗi kết nối chưa xác định.');
@@ -467,7 +466,7 @@ async function checkBackendHealth(showToastAfter=false){
  try{
   if(IS_GITHUB_PAGES&&!GAS_WEBAPP_URL_VALID)throw new Error('GAS_WEBAPP_URL chưa chứa URL Web App hợp lệ kết thúc bằng /exec.');
   const result=await gasCall('apiPublicHealth');
-  if(!result||typeof result!=='object')throw new Error('Bridge trả về dữ liệu không hợp lệ.');
+  if(!result||typeof result!=='object')throw new Error('GAS trả về dữ liệu không hợp lệ.');
   if(!result.ok){
    const msg=healthMessageFor(result.code,result.message);
    updateBackendHealth('error',msg);
@@ -487,11 +486,11 @@ async function checkBackendHealth(showToastAfter=false){
   return result;
  }catch(err){
   const raw=String(err&&err.message||err||'');
-  const msg=healthMessageFor(/API method is not allowed|API method not allowed/i.test(raw)?'API_METHOD_NOT_ALLOWED':'FRONTEND_BRIDGE_FAILED',raw);
+  const msg=healthMessageFor(/API method is not allowed|API method not allowed/i.test(raw)?'API_METHOD_NOT_ALLOWED':'GAS_RPC_TRANSPORT_FAILED',raw);
   updateBackendHealth('error',msg);
   console.error('[IT WORKSPACE] backend health check failed:',err);
   if(showToastAfter)showToast(lang==='en'?'Connection failed':'Không kết nối được GAS / Sheet',msg,'error');
-  return {ok:false,code:'FRONTEND_BRIDGE_FAILED',message:msg,detail:raw};
+  return {ok:false,code:'GAS_RPC_TRANSPORT_FAILED',message:msg,detail:raw};
  }
 }
 function renderPublicIpResults(){const root=$('#publicIpResults');if(!root)return;if(publicSearchLoading){root.innerHTML=`<div class="public-ip-empty">${esc(landTx('loading'))}</div>`;return;}if(publicSearchError){root.innerHTML=`<div class="public-ip-empty">${esc(publicSearchError)}</div>`;return;}if(!publicSearchResults.length){const message=publicSearchQuery?landTx('noResults'):landTx('enterSearch');root.innerHTML=`<div class="public-ip-empty">${esc(message)}</div>`;return;}root.innerHTML=publicSearchResults.map(r=>`<article class="public-ip-card"><div class="public-ip-card-top"><div class="public-ip-address">${esc(r.ip||'')}</div><span class="public-ip-badge">${esc((landTx('resultStatus')||{})[r.status]||r.status||'')}</span></div><h3>${esc(r.device||r.dept||'')}</h3><p>${esc([r.dept,r.unit].filter(Boolean).join(' · '))}</p></article>`).join('');}
