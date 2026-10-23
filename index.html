@@ -268,7 +268,7 @@ function ensureGasBridgeReady(){
       gasBridgeOrigin = '';
       if(gasBridgeRejectReady) gasBridgeRejectReady(err);
       gasBridgeResolveReady = null; gasBridgeRejectReady = null;
-    },25000);
+    },7000);
     try {
       const url = new URL(GAS_WEBAPP_URL); url.searchParams.set('bridge','1'); url.searchParams.set('bridgeVersion','1');
       frame.src = url.toString(); document.body.appendChild(frame);
@@ -296,24 +296,64 @@ window.addEventListener('message',event=>{
   if(message.transportOk) pending.resolve(message.result);
   else pending.reject(new Error(message.message || 'GAS request failed.'));
 });
-async function gasBridgeCall(name,args){
-  await ensureGasBridgeReady();
+function gasCallTimeoutMs(name){
+  // Bound every request so a lost iframe callback cannot lock the whole UI.
+  // Imports remain subject to the same limit; the user can inspect the list before retrying.
+  return 12000;
+}
+function gasTimeoutError(name, timeoutMs){
+  const writeMethods=new Set(['apiUpsertRecord','apiDeleteRecord','apiImportRecords','apiCatalogMutate','apiSaveSettings','apiSaveBranding','apiChangeAdminPassword','apiSaveHelpArticle','apiDeleteHelpArticle','apiQueueDiagnostic']);
+  if(typeof lang!=='undefined'&&lang==='en'){
+    return new Error('The request did not respond within '+Math.round(timeoutMs/1000)+' seconds. Waiting has stopped to keep the page responsive. '+(writeMethods.has(name)?'The server may still finish the operation; refresh the data before retrying.':'Check the connection and try again.'));
+  }
+  return new Error('Không nhận được phản hồi trong '+Math.round(timeoutMs/1000)+' giây. Hệ thống đã dừng chờ để tránh treo giao diện. '+(writeMethods.has(name)?'Máy chủ có thể vẫn hoàn tất thao tác; hãy tải lại dữ liệu để kiểm tra trước khi thực hiện lại.':'Vui lòng kiểm tra kết nối rồi thử lại.'));
+}
+function gasBridgeCall(name,args){
+  const timeoutMs=gasCallTimeoutMs(name);
   return new Promise((resolve,reject)=>{
-    const id = 'rpc_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,12);
-    const timer = setTimeout(()=>{gasBridgePending.delete(id);reject(new Error('GAS xử lý quá thời gian chờ. Vui lòng thử lại.'));},120000);
-    gasBridgePending.set(id,{resolve,reject,timer});
-    try { gasBridgeFrame.contentWindow.postMessage({channel:ITW_BRIDGE_CHANNEL,type:'request',id,method:String(name),args:Array.isArray(args)?args:[]},gasBridgeOrigin); }
-    catch(e){clearTimeout(timer);gasBridgePending.delete(id);reject(e);}
+    const id='rpc_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,12);
+    let timedOut=false;
+    const timer=setTimeout(()=>{timedOut=true;gasBridgePending.delete(id);reject(gasTimeoutError(name,timeoutMs));},timeoutMs);
+    (async()=>{
+      try{
+        await ensureGasBridgeReady();
+        if(timedOut)return;
+        if(!gasBridgeReady||!gasBridgeFrame||!gasBridgeOrigin)throw new Error('Không kết nối được GAS bridge. Kiểm tra URL /exec, quyền Web App và deployment.');
+        gasBridgePending.set(id,{resolve,reject,timer});
+        gasBridgeFrame.contentWindow.postMessage({channel:ITW_BRIDGE_CHANNEL,type:'request',id,method:String(name),args:Array.isArray(args)?args:[]},gasBridgeOrigin);
+      }catch(e){
+        if(timedOut)return;
+        clearTimeout(timer);gasBridgePending.delete(id);reject(e);
+      }
+    })();
   });
 }
-function gasCallRaw(name,...args){return new Promise((resolve,reject)=>{try{if(GAS_MODE){const runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(e=>reject(new Error(e&&e.message?e.message:String(e))));runner[name](...args);return;}if(GAS_BRIDGE_MODE){gasBridgeCall(name,args).then(resolve,reject);return;}reject(new Error('GAS_WEBAPP_URL chưa được cấu hình trong config.js.'));}catch(e){reject(e);}})}
+function withGasTimeout(promise,name,timeoutMs){
+  let timer;
+  const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>reject(gasTimeoutError(name,timeoutMs)),timeoutMs);});
+  return Promise.race([promise,timeout]).finally(()=>clearTimeout(timer));
+}
+function gasCallRaw(name,...args){
+  try{
+    if(GAS_MODE){
+      const call=new Promise((resolve,reject)=>{
+        try{const runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(e=>reject(new Error(e&&e.message?e.message:String(e))));runner[name](...args);}
+        catch(e){reject(e);}
+      });
+      return withGasTimeout(call,name,gasCallTimeoutMs(name));
+    }
+    if(GAS_BRIDGE_MODE)return gasBridgeCall(name,args);
+    return Promise.reject(new Error('GAS_WEBAPP_URL chưa được cấu hình trong config.js.'));
+  }catch(e){return Promise.reject(e);}
+}
 let globalLoadingDepth=0,globalLoadingTimer=null;
-function globalLoadingStrings(){return typeof lang!=='undefined'&&lang==='en'?{title:'Working...',detail:'Please wait while the request completes.'}:{title:'Đang xử lý...',detail:'Vui lòng chờ hệ thống hoàn tất thao tác.'};}
+function globalLoadingStrings(){return typeof lang!=='undefined'&&lang==='en'?{title:'Working...',detail:'Waiting for the server (max 12 seconds)...'}:{title:'Đang xử lý...',detail:'Đang chờ máy chủ phản hồi (tối đa 12 giây)...'};}
 function ensureGlobalLoadingOverlay(){let overlay=document.getElementById('globalLoadingOverlay');if(overlay)return overlay;overlay=document.createElement('div');overlay.id='globalLoadingOverlay';overlay.setAttribute('role','status');overlay.setAttribute('aria-live','polite');overlay.setAttribute('aria-hidden','true');const card=document.createElement('div');card.className='global-loading-card';const spinner=document.createElement('span');spinner.className='global-loading-spinner';spinner.setAttribute('aria-hidden','true');const text=document.createElement('div');text.className='global-loading-text';const title=document.createElement('strong');title.id='globalLoadingTitle';const detail=document.createElement('span');detail.id='globalLoadingDetail';text.append(title,detail);card.append(spinner,text);overlay.append(card);document.body.append(overlay);return overlay;}
 function updateGlobalLoadingText(){const strings=globalLoadingStrings();const title=document.getElementById('globalLoadingTitle');const detail=document.getElementById('globalLoadingDetail');if(title)title.textContent=strings.title;if(detail)detail.textContent=strings.detail;}
 function beginGlobalLoading(){globalLoadingDepth++;if(globalLoadingDepth===1){globalLoadingTimer=setTimeout(()=>{globalLoadingTimer=null;if(globalLoadingDepth>0){const overlay=ensureGlobalLoadingOverlay();updateGlobalLoadingText();overlay.classList.add('is-visible');overlay.setAttribute('aria-hidden','false');}},140);}}
 function endGlobalLoading(){globalLoadingDepth=Math.max(0,globalLoadingDepth-1);if(globalLoadingDepth!==0)return;if(globalLoadingTimer){clearTimeout(globalLoadingTimer);globalLoadingTimer=null;}const overlay=document.getElementById('globalLoadingOverlay');if(overlay){overlay.classList.remove('is-visible');overlay.setAttribute('aria-hidden','true');}}
-async function gasCall(name,...args){beginGlobalLoading();try{return await gasCallRaw(name,...args)}finally{endGlobalLoading()}}
+const QUIET_API_METHODS=new Set(['apiPublicIpSearch','apiPublicBranding','apiPublicNetworkLookup','apiPublicHelpArticles','apiGetDiagnosticResult']);
+async function gasCall(name,...args){if(QUIET_API_METHODS.has(name))return gasCallRaw(name,...args);beginGlobalLoading();try{return await gasCallRaw(name,...args)}finally{endGlobalLoading()}}
 function setBusy(el,busy,label){if(!el)return;if(busy){if(!el.dataset.oldLabel)el.dataset.oldLabel=el.innerHTML;el.disabled=true;el.setAttribute('aria-busy','true');el.replaceChildren();const spinner=document.createElement('span');spinner.className='mini-spinner';spinner.setAttribute('aria-hidden','true');const text=document.createElement('span');text.textContent=label||(typeof lang!=='undefined'&&lang==='en'?'Working…':'Đang xử lý…');el.append(spinner,text);}else{el.disabled=false;el.removeAttribute('aria-busy');if(el.dataset.oldLabel){el.innerHTML=el.dataset.oldLabel;delete el.dataset.oldLabel;}}}
 async function applyBootstrapData(data){if(!data||!data.ok)throw new Error((data&&data.message)||'Không thể tải dữ liệu hệ thống.');if(data.role)currentRole=data.role;records=Array.isArray(data.records)?data.records:[];departments=Array.isArray(data.catalogs?.departments)?data.catalogs.departments:[];carriers=Array.isArray(data.catalogs?.carriers)?data.catalogs.carriers:[];vlans=Array.isArray(data.catalogs?.vlans)?data.catalogs.vlans:[];deviceTypes=Array.isArray(data.catalogs?.deviceTypes)?data.catalogs.deviceTypes:[];units=Array.isArray(data.catalogs?.units)?data.catalogs.units:[];activities=Array.isArray(data.activities)?data.activities:[];settings={...settings,...(data.settings||{})};branding={...BRAND_DEFAULTS,...branding,...(data.branding||{}),logo:(data.branding&&data.branding.logo)||branding.logo||BRAND_DEFAULTS.logo};rebuildTopologyGraph();applyBranding();}
 async function refreshFromServer(){if(!BACKEND_MODE||!authToken)return;const data=await gasCall('apiBootstrap',authToken);await applyBootstrapData(data);}
