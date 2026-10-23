@@ -1,5 +1,5 @@
 /* IT WORKSPACE app shell only. Never cache cross-origin GAS requests or API results. */
-const CACHE_NAME = 'viettel-it-shell-v20261023-05';
+const CACHE_NAME = 'viettel-it-shell-v20261023-06-blockedip-header-polish';
 const APP_SHELL = [
   './',
   './index.html',
