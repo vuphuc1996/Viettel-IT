@@ -1,5 +1,5 @@
 /* IT WORKSPACE app-shell cache only. Never cache GAS requests, query results, or authenticated data. */
-const CACHE_NAME = 'viettel-it-shell-v20261024-catalog-uppercase-v4-profilefix';
+const CACHE_NAME = 'viettel-it-shell-v20261024-catalog-uppercase-v5-save-toast-fix';
 const APP_SHELL = [
   './',
   './index.html',
