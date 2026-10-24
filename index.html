@@ -1690,6 +1690,21 @@ function openIpDetailsModal(id){
  const content='<div class="ip-detail-grid">'+fields.map(function(field){const value=field[1] == null || field[1] === '' ? tx('detailNoValue') : (Array.isArray(field[1])?field[1].join(', '):String(field[1]));return '<div class="ip-detail-field"><small>'+esc(field[0])+'</small><strong>'+esc(value)+'</strong></div>';}).join('')+'</div><p class="issue-privacy-note">'+esc(lang==='en'?'This detail view is based on stored inventory fields. It is not a live Windows ipconfig command output.':'Đây là thông tin từ dữ liệu quản lý đã lưu, không phải kết quả chạy lệnh ipconfig trực tiếp trên máy. ')+'</p>';
  modal(tx('detailIpTitle')+' · '+esc(r.ip||''),tx('detailIpDesc'),content,btn(tx('close'),'close-modal','secondary'),'wide ip-detail-modal');
 }
+function toggleAdminProfile(forceOpen){
+ const wrap = $('#adminProfileWrap');
+ const menu = $('#adminProfileMenu');
+ const trigger = $('#adminProfileButton');
+ if(!wrap || !menu || !trigger) return;
+ const currentlyOpen = !menu.classList.contains('hidden');
+ const shouldOpen = typeof forceOpen === 'boolean' ? forceOpen : !currentlyOpen;
+ menu.classList.toggle('hidden', !shouldOpen);
+ trigger.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+ if(shouldOpen){
+  const firstAction = menu.querySelector('[role="menuitem"]');
+  if(firstAction) firstAction.focus({preventScroll:true});
+ }
+}
+
 function toggleAdminProfileAndClose(){toggleAdminProfile(false);}
 
 function guideSearchNormalize(value){return String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/đ/g,'d').replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');}
